@@ -21,6 +21,14 @@ node scripts/run-recruitment-pipeline.mjs --workdir workspace --writeback apply
 
 如果某个渠道本轮没有新候选人，会跳过该渠道的评估和写回。
 
+脚本会使用锁文件防止并发运行：
+
+- `workspace/pipeline.lock`：防止两个完整 pipeline 同时运行。
+- `workspace/collected/feishu_hire.collection.lock`：防止飞书招聘渠道重复采集。
+- `workspace/collected/email_resume.collection.lock`：防止邮箱渠道重复采集。
+
+如果锁文件存在，脚本会直接退出，不会继续采集或写回。
+
 ## 本地配置
 
 本地配置放在 `workspace/` 下，不提交到 Git。

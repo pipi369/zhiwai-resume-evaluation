@@ -2,9 +2,12 @@
 
 import { execFileSync } from 'child_process';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'fs';
 import path from 'path';
@@ -30,6 +33,13 @@ function main() {
   const runId = formatBeijingForFile(new Date());
   const pipelineDir = path.join(workdir, 'pipeline-runs');
   mkdirSync(pipelineDir, { recursive: true });
+  const lockPath = path.join(workdir, 'pipeline.lock');
+  acquireLock(lockPath, {
+    type: 'pipeline',
+    run_id: runId,
+    workdir,
+    created_at: nowBeijingIso(),
+  });
 
   const summary = {
     run_id: runId,
@@ -47,24 +57,28 @@ function main() {
     },
   };
 
-  for (const channel of CHANNELS) {
-    const item = runChannel({ channel, workdir, repoRoot, writebackMode });
-    summary.channels.push(item);
-    if (item.collected_file) summary.summary.collected_files += 1;
-    if (item.evaluated_file) summary.summary.evaluated_files += 1;
-    if (item.preview_file) summary.summary.preview_files += 1;
-    if (item.result_file) summary.summary.applied_files += 1;
-    if (item.status === 'skipped_empty') summary.summary.skipped_empty += 1;
-    if (item.status === 'failed') summary.summary.failed += 1;
+  try {
+    for (const channel of CHANNELS) {
+      const item = runChannel({ channel, workdir, repoRoot, writebackMode });
+      summary.channels.push(item);
+      if (item.collected_file) summary.summary.collected_files += 1;
+      if (item.evaluated_file) summary.summary.evaluated_files += 1;
+      if (item.preview_file) summary.summary.preview_files += 1;
+      if (item.result_file) summary.summary.applied_files += 1;
+      if (item.status === 'skipped_empty') summary.summary.skipped_empty += 1;
+      if (item.status === 'failed') summary.summary.failed += 1;
+    }
+
+    summary.finished_at = nowBeijingIso();
+    const outputPath = path.join(pipelineDir, `${runId}.pipeline-result.json`);
+    writeJson(outputPath, summary);
+
+    console.log(`[pipeline] result=${outputPath}`);
+    console.log(`[pipeline] collected=${summary.summary.collected_files}, evaluated=${summary.summary.evaluated_files}, preview=${summary.summary.preview_files}, applied=${summary.summary.applied_files}, skipped_empty=${summary.summary.skipped_empty}, failed=${summary.summary.failed}`);
+    if (summary.summary.failed > 0) process.exitCode = 1;
+  } finally {
+    releaseLock(lockPath);
   }
-
-  summary.finished_at = nowBeijingIso();
-  const outputPath = path.join(pipelineDir, `${runId}.pipeline-result.json`);
-  writeJson(outputPath, summary);
-
-  console.log(`[pipeline] result=${outputPath}`);
-  console.log(`[pipeline] collected=${summary.summary.collected_files}, evaluated=${summary.summary.evaluated_files}, preview=${summary.summary.preview_files}, applied=${summary.summary.applied_files}, skipped_empty=${summary.summary.skipped_empty}, failed=${summary.summary.failed}`);
-  if (summary.summary.failed > 0) process.exit(1);
 }
 
 function runChannel({ channel, workdir, repoRoot, writebackMode }) {
@@ -226,6 +240,26 @@ function writeJson(filePath, data) {
 function fail(message) {
   console.error(`[pipeline] ${message}`);
   process.exit(1);
+}
+
+function acquireLock(lockPath, payload) {
+  try {
+    const fd = openSync(lockPath, 'wx');
+    try {
+      writeFileSync(fd, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      fail(`Pipeline is already running. Lock exists: ${lockPath}`);
+    }
+    throw error;
+  }
+}
+
+function releaseLock(lockPath) {
+  rmSync(lockPath, { force: true });
 }
 
 function nowBeijingIso() {

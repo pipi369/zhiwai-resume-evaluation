@@ -79,6 +79,15 @@ node scripts/collect-recruitment-data.mjs --channel email_resume --workdir <work
 <workdir>/runtime-state.json
 ```
 
+采集锁文件按渠道固定：
+
+```text
+<workdir>/collected/feishu_hire.collection.lock
+<workdir>/collected/email_resume.collection.lock
+```
+
+同一个渠道不能并发采集。如果锁文件存在，脚本必须直接退出并报告已有采集正在运行。
+
 ## 时间范围
 
 脚本自行计算时间范围，不从入口参数读取时间。

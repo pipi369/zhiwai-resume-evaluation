@@ -82,6 +82,7 @@ email_resume
 ```text
 <workdir>/
   runtime-state.json
+  pipeline.lock
   evaluator-config.json
   writeback-config.json
   collected/
@@ -132,6 +133,9 @@ pipeline 结果写入：
 
 ## 执行规则
 
+- pipeline 启动时会创建 `<workdir>/pipeline.lock`，防止两个完整 pipeline 同时运行。
+- 如果 `<workdir>/pipeline.lock` 已存在，脚本必须直接退出，不继续采集、评估或写回。
+- 采集脚本还会创建 channel 级锁：`<workdir>/collected/<channel>.collection.lock`。
 - 不要在编排 Skill 中直接调用大模型 API、飞书 API 或邮箱 API；这些由底层脚本负责。
 - 不要改动 `runtime-state.json`、`evaluation-state.json`、lock 文件或 preview/result 文件，除非底层脚本自己写入。
 - 某个渠道失败时，另一个渠道仍可继续执行；最终 `failed > 0` 时脚本退出码为 1。

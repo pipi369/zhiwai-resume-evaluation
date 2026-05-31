@@ -2,9 +2,12 @@
 
 import { execFileSync, execSync } from 'child_process';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'fs';
 import path from 'path';
@@ -37,59 +40,70 @@ async function main() {
   const collectedDir = path.join(workdir, 'collected');
   const statePath = path.join(workdir, 'runtime-state.json');
   mkdirSync(collectedDir, { recursive: true });
-
-  const end = nowBeijing();
-  const state = loadState(statePath);
-  const lastSuccess = state.collection?.[args.channel]?.last_success_at || null;
-  const start = lastSuccess ? new Date(lastSuccess) : new Date(end.getTime() - 60 * 60 * 1000);
-  const runId = `${formatBeijingForFile(end)}_${args.channel}`;
-  const outputPath = nextOutputPath(path.join(collectedDir, `${runId}.json`));
-
-  console.log(`[collector] channel=${args.channel}`);
-  console.log(`[collector] workdir=${workdir}`);
-  console.log(`[collector] window=${toBeijingIso(start)} -> ${toBeijingIso(end)}`);
-
-  const errors = [];
-  let fetched = [];
-
-  const collectedAt = toBeijingIso(end);
-  if (args.channel === 'feishu_hire') {
-    fetched = collectFeishuHire(start, end, errors);
-  } else {
-    fetched = collectEmailResumes(start, end, errors, collectedAt);
-  }
-
-  const { candidates, duplicates } = mergeCandidatesByUniqueKey(fetched);
-  const payload = {
-    run_id: path.basename(outputPath, '.json'),
+  const lockPath = path.join(collectedDir, `${args.channel}.collection.lock`);
+  acquireLock(lockPath, {
+    type: 'collection',
     channel: args.channel,
-    collected_at: collectedAt,
-    time_range: {
-      start: toBeijingIso(start),
-      end: toBeijingIso(end),
-    },
-    candidates,
-    duplicates,
-    errors,
-    summary: {
-      total_fetched: fetched.length,
-      total: candidates.length,
-      duplicate: duplicates.length,
-      failed: errors.length,
-    },
-  };
+    workdir,
+    created_at: nowBeijingIso(),
+  });
 
-  writeJson(outputPath, payload);
-  const hasFatalError = errors.some(error => error.fatal);
-  if (!hasFatalError) {
-    updateState(statePath, state, args.channel, toBeijingIso(end), outputPath);
-  }
+  try {
+    const end = nowBeijing();
+    const state = loadState(statePath);
+    const lastSuccess = state.collection?.[args.channel]?.last_success_at || null;
+    const start = lastSuccess ? new Date(lastSuccess) : new Date(end.getTime() - 60 * 60 * 1000);
+    const runId = `${formatBeijingForFile(end)}_${args.channel}`;
+    const outputPath = nextOutputPath(path.join(collectedDir, `${runId}.json`));
 
-  console.log(`[collector] output=${outputPath}`);
-  console.log(`[collector] candidates=${candidates.length}, duplicates=${duplicates.length}, errors=${errors.length}`);
-  if (hasFatalError) {
-    console.error('[collector] fatal source error; runtime-state.json was not updated');
-    process.exit(1);
+    console.log(`[collector] channel=${args.channel}`);
+    console.log(`[collector] workdir=${workdir}`);
+    console.log(`[collector] window=${toBeijingIso(start)} -> ${toBeijingIso(end)}`);
+
+    const errors = [];
+    let fetched = [];
+
+    const collectedAt = toBeijingIso(end);
+    if (args.channel === 'feishu_hire') {
+      fetched = collectFeishuHire(start, end, errors);
+    } else {
+      fetched = collectEmailResumes(start, end, errors, collectedAt);
+    }
+
+    const { candidates, duplicates } = mergeCandidatesByUniqueKey(fetched);
+    const payload = {
+      run_id: path.basename(outputPath, '.json'),
+      channel: args.channel,
+      collected_at: collectedAt,
+      time_range: {
+        start: toBeijingIso(start),
+        end: toBeijingIso(end),
+      },
+      candidates,
+      duplicates,
+      errors,
+      summary: {
+        total_fetched: fetched.length,
+        total: candidates.length,
+        duplicate: duplicates.length,
+        failed: errors.length,
+      },
+    };
+
+    writeJson(outputPath, payload);
+    const hasFatalError = errors.some(error => error.fatal);
+    if (!hasFatalError) {
+      updateState(statePath, state, args.channel, toBeijingIso(end), outputPath);
+    }
+
+    console.log(`[collector] output=${outputPath}`);
+    console.log(`[collector] candidates=${candidates.length}, duplicates=${duplicates.length}, errors=${errors.length}`);
+    if (hasFatalError) {
+      console.error('[collector] fatal source error; runtime-state.json was not updated');
+      process.exitCode = 1;
+    }
+  } finally {
+    releaseLock(lockPath);
   }
 }
 
@@ -119,6 +133,26 @@ function printUsage() {
 function fail(message) {
   console.error(`[collector] ${message}`);
   process.exit(1);
+}
+
+function acquireLock(lockPath, payload) {
+  try {
+    const fd = openSync(lockPath, 'wx');
+    try {
+      writeFileSync(fd, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      fail(`Collection is already running. Lock exists: ${lockPath}`);
+    }
+    throw error;
+  }
+}
+
+function releaseLock(lockPath) {
+  rmSync(lockPath, { force: true });
 }
 
 function loadState(statePath) {
