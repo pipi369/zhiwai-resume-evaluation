@@ -175,6 +175,8 @@ workspace/collected/2026-05-31_152333_email_resume.json
 
 ```json
 {
+  "unique_key": "string",
+  "application_count": 1,
   "candidate_id": "string",
   "channel": "feishu_hire | email_resume",
   "source_record_id": "string",
@@ -191,6 +193,8 @@ workspace/collected/2026-05-31_152333_email_resume.json
 
 字段含义：
 
+- `unique_key`：业务唯一键，用于表示“同一候选人 + 同一岗位”。
+- `application_count`：本轮同一 `unique_key` 出现次数。
 - `display_fields`：给人看的摘要。
 - `eval_input`：后续评估用的输入。
 - `raw_refs`：审计追溯用的原始 ID、API 引用、邮件/附件 ID。
@@ -350,10 +354,17 @@ workspace/collected/2026-05-31_152333_email_resume.json
 - `feishu_hire`：优先使用 `application_id`，没有时使用 `talent_id + job_id`。
 - `email_resume`：使用 `message_id + attachment_id`。
 
+每个渠道使用固定规则生成 `unique_key`：
+
+- `feishu_hire`：`feishu_hire:<candidate_id 或 application_id>:<job_name>`。
+- `email_resume`：`email_resume:<job_name>:<name>`；如果姓名缺失，用 `source_record_id` 兜底。
+
 去重处理：
 
 - 每次运行都生成新的日期 JSON，不覆盖历史 JSON。
 - 本轮内部重复的 `dedupe_key` 不进入 `candidates`，写入 `duplicates`。
+- 本轮内部相同 `unique_key` 会合并成一条 candidate，并累加 `application_count`。
+- 被合并记录的来源 ID 必须保留在 `raw_refs.source_record_ids` 中。
 - 历史 collected JSON 只作为审计快照，不参与本次去重。
 - 历史中存在同一个 `dedupe_key` 时，本轮仍允许进入 `candidates`。
 - 不要跨渠道静默合并候选人。
@@ -383,4 +394,3 @@ Fatal error：
 - 不要把 `/tmp` 作为唯一产物存储位置；`/tmp` 只能放临时下载/解析文件。
 - 不要把凭证、access token、secret 写入 JSON。
 - 不要丢弃后续审计需要的原始引用。
-

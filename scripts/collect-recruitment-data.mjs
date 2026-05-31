@@ -59,7 +59,7 @@ async function main() {
     fetched = collectEmailResumes(start, end, errors, collectedAt);
   }
 
-  const { candidates, duplicates } = dedupeCandidates(fetched);
+  const { candidates, duplicates } = mergeCandidatesByUniqueKey(fetched);
   const payload = {
     run_id: path.basename(outputPath, '.json'),
     channel: args.channel,
@@ -158,33 +158,74 @@ function nextOutputPath(basePath) {
   fail(`Too many output files with same timestamp near ${basePath}`);
 }
 
-function dedupeCandidates(fetched) {
+function mergeCandidatesByUniqueKey(fetched) {
   const seen = new Set();
+  const byUniqueKey = new Map();
   const candidates = [];
   const duplicates = [];
 
   for (const candidate of fetched) {
-    const key = candidate.dedupe_key;
-    if (!key) {
+    const dedupeKey = candidate.dedupe_key;
+    if (!dedupeKey) {
       duplicates.push({
         reason: 'missing_dedupe_key',
         candidate,
       });
       continue;
     }
-    if (seen.has(key)) {
+    if (seen.has(dedupeKey)) {
       duplicates.push({
         reason: 'duplicate_in_current_run',
-        dedupe_key: key,
+        dedupe_key: dedupeKey,
         source_record_id: candidate.source_record_id,
       });
       continue;
     }
-    seen.add(key);
+
+    seen.add(dedupeKey);
+    const uniqueKey = candidate.unique_key;
+    if (!uniqueKey) {
+      duplicates.push({
+        reason: 'missing_unique_key',
+        dedupe_key: dedupeKey,
+        source_record_id: candidate.source_record_id,
+      });
+      continue;
+    }
+
+    if (byUniqueKey.has(uniqueKey)) {
+      mergeDuplicateCandidate(byUniqueKey.get(uniqueKey), candidate);
+      continue;
+    }
+
+    candidate.application_count = candidate.application_count || 1;
+    ensureRawRefArray(candidate.raw_refs, 'source_record_ids', candidate.source_record_id);
+    if (candidate.channel === 'feishu_hire') {
+      ensureRawRefArray(candidate.raw_refs, 'application_ids', candidate.application_id);
+    } else if (candidate.channel === 'email_resume') {
+      ensureRawRefArray(candidate.raw_refs, 'message_attachment_ids', candidate.source_record_id);
+    }
+    byUniqueKey.set(uniqueKey, candidate);
     candidates.push(candidate);
   }
 
   return { candidates, duplicates };
+}
+
+function mergeDuplicateCandidate(target, incoming) {
+  target.application_count = (target.application_count || 1) + 1;
+  ensureRawRefArray(target.raw_refs, 'source_record_ids', incoming.source_record_id);
+  if (incoming.channel === 'feishu_hire') {
+    ensureRawRefArray(target.raw_refs, 'application_ids', incoming.application_id);
+  } else if (incoming.channel === 'email_resume') {
+    ensureRawRefArray(target.raw_refs, 'message_attachment_ids', incoming.source_record_id);
+  }
+}
+
+function ensureRawRefArray(rawRefs, key, value) {
+  if (!rawRefs || !value) return;
+  if (!Array.isArray(rawRefs[key])) rawRefs[key] = [];
+  if (!rawRefs[key].includes(value)) rawRefs[key].push(value);
 }
 
 function collectFeishuHire(start, end, errors) {
@@ -268,6 +309,8 @@ function collectFeishuHire(start, end, errors) {
     const dedupeKey = applicationId || [app.talent_id, app.job_id].filter(Boolean).join(':');
 
     return {
+      unique_key: buildUniqueKey('feishu_hire', app.talent_id || applicationId, job.name || null),
+      application_count: 1,
       candidate_id: app.talent_id || applicationId,
       channel: 'feishu_hire',
       source_record_id: applicationId,
@@ -355,22 +398,26 @@ function collectEmailResumes(start, end, errors, collectedAt) {
     const messagePrefix = String(d.smtp_message_id || mail.message_id).replace(/@.*/, '').slice(0, 8);
     const candidateId = `MAIL-${messagePrefix}-1`;
     const dedupeKey = `${mail.message_id}:${attachment.id}`;
+    const resolvedJobName = mapPosition(parsed.position);
+    const resolvedName = resume.parsed.realName || parsed.name || null;
 
     collected.push({
+      unique_key: buildUniqueKey('email_resume', resolvedJobName, resolvedName || dedupeKey),
+      application_count: 1,
       candidate_id: candidateId,
       channel: 'email_resume',
       source_record_id: `${mail.message_id}:${attachment.id}`,
       dedupe_key: dedupeKey,
       job_id: null,
-      job_name: mapPosition(parsed.position),
+      job_name: resolvedJobName,
       application_id: null,
       display_fields: {
         sender: d.head_from?.name || d.head_from?.email || null,
         subject: mail.subject || null,
         received_at: receivedMs ? toBeijingIso(new Date(receivedMs)) : null,
         attachment_names: [attachment.filename],
-        job_name: mapPosition(parsed.position),
-        name: resume.parsed.realName || parsed.name || null,
+        job_name: resolvedJobName,
+        name: resolvedName,
         phone: resume.parsed.phone || null,
         email: resume.parsed.email || null,
         city: mapCity(parsed.city),
@@ -379,8 +426,8 @@ function collectEmailResumes(start, end, errors, collectedAt) {
         degree: resume.parsed.degree || null,
       },
       eval_input: {
-        name: resume.parsed.realName || parsed.name || null,
-        position: mapPosition(parsed.position),
+        name: resolvedName,
+        position: resolvedJobName,
         resume_text: resume.text || '',
         email_subject: mail.subject || null,
         email_body: d.body || d.snippet || null,
@@ -643,11 +690,7 @@ function mapHireCity(app, talent, job) {
 }
 
 function mapCity(city) {
-  if (!city) return null;
-  if (city.includes('成都')) return '成都';
-  if (city.includes('深圳')) return '深圳';
-  if (city.includes('杭州')) return '杭州';
-  return '其他';
+  return city ? String(city).trim() : null;
 }
 
 function mapPosition(position) {
@@ -833,6 +876,17 @@ function parseResumeText(text) {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function buildUniqueKey(channel, identity, jobName) {
+  return [channel, normalizeKeyPart(identity), normalizeKeyPart(jobName || 'unknown_job')].join(':');
+}
+
+function normalizeKeyPart(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/:/g, '：') || 'unknown';
 }
 
 function sleep(ms) {
