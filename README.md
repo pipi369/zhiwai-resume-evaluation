@@ -84,7 +84,8 @@ workspace/
     "prompt_field": "评估提示词"
   },
   "evaluation": {
-    "max_prompt_chars": 16000
+    "max_prompt_chars": 16000,
+    "concurrency": 3
   }
 }
 ```
@@ -101,6 +102,7 @@ workspace/
 - `criteria_table.job_name_field`：岗位名称列，固定用 `岗位名称`。
 - `criteria_table.prompt_field`：评估提示词列，固定用 `评估提示词`。
 - `evaluation.max_prompt_chars`：候选人资料拼进提示词的最大字符数。
+- `evaluation.concurrency`：候选人大模型评估并发数。不配置默认 `1`，建议先设置 `2` 或 `3`。
 
 评估标准表必须至少有两列：
 

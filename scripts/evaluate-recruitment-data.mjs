@@ -76,22 +76,19 @@ async function main() {
     const errors = [];
     const evaluatedAt = nowBeijingIso();
     const maxPromptChars = config.evaluation?.max_prompt_chars || DEFAULT_MAX_PROMPT_CHARS;
+    const concurrency = normalizeConcurrency(config.evaluation?.concurrency);
 
-    for (const candidate of collected.candidates) {
-      const result = evaluateCandidate(candidate, criteriaMap, config, maxPromptChars);
-      results.push(result);
-      if (result.status === 'completed') state.completed += 1;
-      else state.failed += 1;
-      if (result.error) {
-        errors.push({
-          candidate_id: candidate.candidate_id,
-          source_record_id: candidate.source_record_id,
-          error: result.error,
-        });
-      }
-      state.updated_at = nowBeijingIso();
-      writeJson(statePath, state);
-    }
+    await runEvaluations({
+      candidates: collected.candidates,
+      criteriaMap,
+      config,
+      maxPromptChars,
+      concurrency,
+      results,
+      errors,
+      state,
+      statePath,
+    });
 
     const payload = {
       run_id: collected.run_id,
@@ -123,6 +120,41 @@ async function main() {
     writeJson(statePath, state);
     throw error;
   }
+}
+
+async function runEvaluations({ candidates, criteriaMap, config, maxPromptChars, concurrency, results, errors, state, statePath }) {
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < candidates.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const candidate = candidates[index];
+      const result = await evaluateCandidate(candidate, criteriaMap, config, maxPromptChars);
+      results[index] = result;
+
+      if (result.status === 'completed') state.completed += 1;
+      else state.failed += 1;
+      if (result.error) {
+        errors.push({
+          candidate_id: candidate.candidate_id,
+          source_record_id: candidate.source_record_id,
+          error: result.error,
+        });
+      }
+      state.updated_at = nowBeijingIso();
+      writeJson(statePath, state);
+    }
+  }
+
+  const workerCount = Math.min(concurrency, candidates.length || 1);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
+function normalizeConcurrency(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+  return Math.min(parsed, 10);
 }
 
 function parseArgs(argv) {
@@ -220,7 +252,7 @@ function loadCriteriaMap(criteriaConfig) {
   return map;
 }
 
-function evaluateCandidate(candidate, criteriaMap, config, maxPromptChars) {
+async function evaluateCandidate(candidate, criteriaMap, config, maxPromptChars) {
   const evaluatedAt = nowBeijingIso();
   const jobName = candidate.job_name || candidate.eval_input?.position || null;
   const criteriaMatches = jobName ? criteriaMap.get(jobName) || [] : [];
@@ -251,7 +283,7 @@ function evaluateCandidate(candidate, criteriaMap, config, maxPromptChars) {
 
   const criteria = criteriaMatches[0];
   const promptResult = buildPrompt(candidate, criteria.prompt, maxPromptChars);
-  const rawOutput = callModel(config.model, promptResult.prompt);
+  const rawOutput = await callModel(config.model, promptResult.prompt);
   const parsed = parseModelEvaluation(rawOutput);
 
   if (!parsed.ok) {
@@ -517,7 +549,7 @@ function cleanResumeText(text) {
     .trim();
 }
 
-function callModel(modelConfig, prompt) {
+async function callModel(modelConfig, prompt) {
   const url = joinUrl(modelConfig.base_url, '/chat/completions');
   const body = {
     model: modelConfig.model,
@@ -533,47 +565,23 @@ function callModel(modelConfig, prompt) {
     response_format: { type: 'json_object' },
   };
 
-  const res = fetchSync(url, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${modelConfig.api_key}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120000),
   });
 
-  if (res.status < 200 || res.status >= 300) {
-    throw new Error(`模型 API 调用失败: HTTP ${res.status} ${res.body.slice(0, 500)}`);
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`模型 API 调用失败: HTTP ${res.status} ${text.slice(0, 500)}`);
   }
 
-  const data = JSON.parse(res.body);
+  const data = JSON.parse(text);
   return data.choices?.[0]?.message?.content || '';
-}
-
-function fetchSync(url, options) {
-  const args = [
-    '-sS',
-    '-X',
-    options.method || 'GET',
-  ];
-  for (const [key, value] of Object.entries(options.headers || {})) {
-    args.push('-H', `${key}: ${value}`);
-  }
-  if (options.body != null) {
-    args.push('--data', options.body);
-  }
-  args.push('-w', '\\n%{http_code}', url);
-
-  const raw = execFileSync('curl', args, {
-    encoding: 'utf8',
-    timeout: 120000,
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  const idx = raw.lastIndexOf('\n');
-  return {
-    body: raw.slice(0, idx),
-    status: Number.parseInt(raw.slice(idx + 1), 10),
-  };
 }
 
 function parseModelEvaluation(rawOutput) {

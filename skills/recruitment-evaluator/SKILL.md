@@ -145,7 +145,7 @@ node scripts/evaluate-recruitment-data.mjs --input <collected_json> --workdir <w
 2. 从飞书多维表格读取岗位评估标准。
 3. 根据 `candidate.channel` 选择字段，组装统一的人类可读候选人信息。
 4. 根据候选人信息和岗位评估标准组装 prompt。
-5. 调用大模型 API。
+5. 按 `workspace/evaluator-config.json` 中的 `evaluation.concurrency` 并发调用大模型 API。
 6. 校验模型输出。
 7. 写入本地 evaluated JSON。
 8. 更新本地 evaluation-state。
@@ -290,6 +290,27 @@ workspace/evaluated/2026-05-31_152333_email_resume.evaluated.json
 用于断点续跑和进度追踪。
 
 同一个 input 文件不能并行评估。
+
+这里的“不能并行评估”指不能启动两个评估进程处理同一个 input 文件。单个评估进程内部可以按配置并发调用大模型。
+
+并发配置来自：
+
+```json
+{
+  "evaluation": {
+    "max_prompt_chars": 16000,
+    "concurrency": 3
+  }
+}
+```
+
+规则：
+
+- 不配置 `evaluation.concurrency` 时默认 `1`，即串行。
+- 建议生产先设置为 `2` 或 `3`。
+- 脚本会把并发数限制在 `1-10`。
+- 输出 `results[]` 顺序必须保持和输入 `candidates[]` 顺序一致。
+- `evaluation-state.json` 只能由当前评估进程更新。
 
 执行前必须检查：
 
